@@ -2,40 +2,35 @@
 # For copyright and license notices, see __manifest__.py file in module root
 # directory
 ##############################################################################
+from odoo import models, fields, api, _
+from odoo.exceptions import ValidationError
 import base64
 import re
 
-from odoo import _, api, fields, models
-from odoo.exceptions import ValidationError
-
 
 class AccountVatLedger(models.Model):
+
     _name = "account.vat.ledger"
     _description = "Account VAT Ledger"
     _inherit = ["mail.thread"]
     _order = "date_from desc"
 
+    # NOTE Odoo 18:
+    # - No usar states= para readonly (se ignora)
+    # - Controlar readonly por estado desde la vista (readonly="state != 'draft'")
+
     company_id = fields.Many2one(
         "res.company",
         string="Company",
         required=True,
-        readonly=True,
-        states={"draft": [("readonly", False)]},
         default=lambda self: self.env["res.company"]._company_default_get("account.vat.ledger"),
     )
-    type = fields.Selection([("sale", "Sale"), ("purchase", "Purchase")], required=True)
-    date_from = fields.Date(
-        string="Start Date",
-        required=True,
-        readonly=True,
-        states={"draft": [("readonly", False)]},
+    type = fields.Selection(
+        [("sale", "Sale"), ("purchase", "Purchase")], "Type", required=True
     )
-    date_to = fields.Date(
-        string="End Date",
-        required=True,
-        readonly=True,
-        states={"draft": [("readonly", False)]},
-    )
+    date_from = fields.Date(string="Start Date", required=True)
+    date_to = fields.Date(string="End Date", required=True)
+
     journal_ids = fields.Many2many(
         "account.journal",
         "account_vat_ledger_journal_rel",
@@ -43,77 +38,54 @@ class AccountVatLedger(models.Model):
         "journal_id",
         string="Journals",
         required=True,
-        readonly=True,
-        states={"draft": [("readonly", False)]},
     )
-    first_page = fields.Integer(
-        required=True,
-        readonly=True,
-        states={"draft": [("readonly", False)]},
-    )
-    last_page = fields.Integer(
-        readonly=True,
-        states={"draft": [("readonly", False)]},
-    )
-    presented_ledger = fields.Binary(
-        readonly=True,
-        states={"draft": [("readonly", False)]},
-    )
+    first_page = fields.Integer("First Page", required=True)
+    last_page = fields.Integer("Last Page")
+
+    presented_ledger = fields.Binary("Presented Ledger")
     presented_ledger_name = fields.Char()
+
     state = fields.Selection(
         [("draft", "Draft"), ("presented", "Presented"), ("cancel", "Cancel")],
+        "State",
         required=True,
         default="draft",
+        tracking=True,
     )
+
     note = fields.Html("Notes")
+
     # Computed fields
-    name = fields.Char("Title", compute="_compute_name")
-    reference = fields.Char()
-    invoice_ids = fields.Many2many("account.ar.vat.line", string="Invoices", compute="_compute_invoices")
+    name = fields.Char("Titile", compute="_compute_name")
+    reference = fields.Char("Reference")
+
+    invoice_ids = fields.Many2many(
+        "account.ar.vat.line", string="Invoices", compute="_compute_invoices"
+    )
+
     # txt for citi / libro iva fields
-    REGINFO_CV_ALICUOTAS = fields.Text(
-        "REGINFO_CV_ALICUOTAS",
-        readonly=True,
-    )
-    REGINFO_CV_COMPRAS_IMPORTACIONES = fields.Text(
-        "REGINFO_CV_COMPRAS_IMPORTACIONES",
-        readonly=True,
-    )
-    REGINFO_CV_CBTE = fields.Text(
-        "REGINFO_CV_CBTE",
-        readonly=True,
-    )
-    REGINFO_CV_CABECERA = fields.Text(
-        "REGINFO_CV_CABECERA",
-        readonly=True,
-    )
+    REGINFO_CV_ALICUOTAS = fields.Text("REGINFO_CV_ALICUOTAS", readonly=True)
+    REGINFO_CV_COMPRAS_IMPORTACIONES = fields.Text("REGINFO_CV_COMPRAS_IMPORTACIONES", readonly=True)
+    REGINFO_CV_CBTE = fields.Text("REGINFO_CV_CBTE", readonly=True)
+    REGINFO_CV_CABECERA = fields.Text("REGINFO_CV_CABECERA", readonly=True)
+
     vouchers_file = fields.Binary(compute="_compute_files", readonly=True)
-    vouchers_filename = fields.Char(
-        compute="_compute_files",
-    )
-    aliquots_file = fields.Binary(
-        compute="_compute_files",
-    )
-    aliquots_filename = fields.Char(
-        compute="_compute_files",
-    )
-    import_aliquots_file = fields.Binary(
-        compute="_compute_files",
-    )
-    import_aliquots_filename = fields.Char(
-        compute="_compute_files",
-    )
+    vouchers_filename = fields.Char(compute="_compute_files")
+
+    aliquots_file = fields.Binary(compute="_compute_files", readonly=True)
+    aliquots_filename = fields.Char(compute="_compute_files")
+
+    import_aliquots_file = fields.Binary(compute="_compute_files", readonly=True)
+    import_aliquots_filename = fields.Char(compute="_compute_files")
+
     prorate_tax_credit = fields.Boolean()
-    prorate_type = fields.Selection(
-        [("global", "Global"), ("by_voucher", "By Voucher")],
-    )
-    tax_credit_computable_amount = fields.Float(
-        "Credit Computable Amount",
-    )
+    prorate_type = fields.Selection([("global", "Global"), ("by_voucher", "By Voucher")])
+    tax_credit_computable_amount = fields.Float("Credit Computable Amount")
+
     sequence = fields.Integer(
         default=0,
         required=True,
-        help="Se deberá indicar si la presentación es Original (00) o " "Rectificativa y su orden",
+        help="Se deberá indicar si la presentación es Original (00) o Rectificativa y su orden",
     )
 
     @api.depends("journal_ids", "date_from", "date_to")
@@ -122,55 +94,50 @@ class AccountVatLedger(models.Model):
             rec.invoice_ids = rec.env["account.ar.vat.line"].search(
                 [
                     ("state", "!=", "draft"),
-                    # ('number', '!=', False),
-                    # ('internal_number', '!=', False),
                     ("journal_id", "in", rec.journal_ids.ids),
                     ("date", ">=", rec.date_from),
                     ("date", "<=", rec.date_to),
                 ]
             )
 
-    @api.depends(
-        "type",
-        "reference",
-    )
+    @api.depends("type", "reference", "date_from", "date_to")
     def _compute_name(self):
-        date_format = self.env["res.lang"]._lang_get(self._context.get("lang", "en_US")).date_format
+        date_format = (
+            self.env["res.lang"]
+            ._lang_get(self._context.get("lang", "en_US"))
+            .date_format
+        )
         for rec in self:
-            if rec.type == "sale":
-                ledger_type = _("Sales")
-            elif rec.type == "purchase":
-                ledger_type = _("Purchases")
-            name = _("%s VAT Ledger %s - %s") % (
-                ledger_type,
-                rec.date_from and fields.Date.from_string(rec.date_from).strftime(date_format) or "",
-                rec.date_to and fields.Date.from_string(rec.date_to).strftime(date_format) or "",
-            )
+            ledger_type = _("Sales") if rec.type == "sale" else _("Purchases")
+
+            df = rec.date_from and fields.Date.to_date(rec.date_from).strftime(date_format) or ""
+            dt = rec.date_to and fields.Date.to_date(rec.date_to).strftime(date_format) or ""
+
+            name = _("%s VAT Ledger %s - %s") % (ledger_type, df, dt)
             if rec.reference:
                 name = "%s - %s" % (name, rec.reference)
             rec.name = name
 
-    @api.onchange("company_id")
+    @api.onchange("company_id", "type")
     def change_company(self):
-        if self.type == "sale":
-            domain = [("type", "=", "sale")]
-        elif self.type == "purchase":
-            domain = [("type", "=", "purchase")]
+        if not self.company_id or not self.type:
+            return
+
+        domain = [("type", "=", self.type)]
         domain += [
             ("l10n_latam_use_documents", "=", True),
             ("company_id", "=", self.company_id.id),
         ]
-        journals = self.env["account.journal"].search(domain)
-        self.journal_ids = journals
+        self.journal_ids = self.env["account.journal"].search(domain)
 
     def action_present(self):
-        self.state = "presented"
+        self.write({"state": "presented"})
 
     def action_cancel(self):
-        self.state = "cancel"
+        self.write({"state": "cancel"})
 
     def action_to_draft(self):
-        self.state = "draft"
+        self.write({"state": "draft"})
 
     def action_print(self):
         self.ensure_one()
@@ -188,48 +155,38 @@ class AccountVatLedger(models.Model):
     @api.depends(
         "REGINFO_CV_CBTE",
         "REGINFO_CV_ALICUOTAS",
+        "REGINFO_CV_COMPRAS_IMPORTACIONES",
         "type",
-        # 'period_id.name'
+        "date_to",
     )
     def _compute_files(self):
-        self.ensure_one()
-        # segun vimos aca la afip espera "ISO-8859-1" en vez de utf-8
-        # http://www.planillasutiles.com.ar/2015/08/
-        # como-descargar-los-archivos-de.html
-        if self.REGINFO_CV_ALICUOTAS:
-            self.aliquots_filename = _("Alicuots_%s_%s.txt") % (
-                self.type,
-                self.date_to,
-                # self.period_id.name
-            )
-            self.aliquots_file = base64.encodestring(self.REGINFO_CV_ALICUOTAS.encode("ISO-8859-1"))
-        else:
-            self.aliquots_file = False
-            self.aliquots_filename = False
-        if self.REGINFO_CV_COMPRAS_IMPORTACIONES:
-            self.import_aliquots_filename = _("Import_Alicuots_%s_%s.txt") % (
-                self.type,
-                self.date_to,
-                # self.period_id.name
-            )
-            self.import_aliquots_file = base64.encodestring(self.REGINFO_CV_COMPRAS_IMPORTACIONES.encode("ISO-8859-1"))
-        else:
-            self.import_aliquots_file = False
-            self.import_aliquots_filename = False
-        if self.REGINFO_CV_CBTE:
-            self.vouchers_filename = _("Vouchers_%s_%s.txt") % (
-                self.type,
-                self.date_to,
-                # self.period_id.name
-            )
-            self.vouchers_file = base64.encodestring(self.REGINFO_CV_CBTE.encode("ISO-8859-1"))
-        else:
-            self.vouchers_file = False
-            self.vouchers_filename = False
+        # Odoo 18: compute puede venir en batch, NO ensure_one()
+        for rec in self:
+            if rec.REGINFO_CV_ALICUOTAS:
+                rec.aliquots_filename = _("Alicuots_%s_%s.txt") % (rec.type, rec.date_to)
+                rec.aliquots_file = base64.b64encode(rec.REGINFO_CV_ALICUOTAS.encode("ISO-8859-1"))
+            else:
+                rec.aliquots_file = False
+                rec.aliquots_filename = False
+
+            if rec.REGINFO_CV_COMPRAS_IMPORTACIONES:
+                rec.import_aliquots_filename = _("Import_Alicuots_%s_%s.txt") % (rec.type, rec.date_to)
+                rec.import_aliquots_file = base64.b64encode(rec.REGINFO_CV_COMPRAS_IMPORTACIONES.encode("ISO-8859-1"))
+            else:
+                rec.import_aliquots_file = False
+                rec.import_aliquots_filename = False
+
+            if rec.REGINFO_CV_CBTE:
+                rec.vouchers_filename = _("Vouchers_%s_%s.txt") % (rec.type, rec.date_to)
+                rec.vouchers_file = base64.b64encode(rec.REGINFO_CV_CBTE.encode("ISO-8859-1"))
+            else:
+                rec.vouchers_file = False
+                rec.vouchers_filename = False
 
     def compute_txt_data(self):
+        self.ensure_one()
+
         alicuotas = self._get_REGINFO_CV_ALICUOTAS()
-        # sacamos todas las lineas y las juntamos
         lines = []
         for k, v in alicuotas.items():
             lines += v
@@ -238,13 +195,16 @@ class AccountVatLedger(models.Model):
         impo_alicuotas = {}
         if self.type == "purchase":
             impo_alicuotas = self._get_REGINFO_CV_ALICUOTAS(impo=True)
-            # sacamos todas las lineas y las juntamos
             lines = []
             for k, v in impo_alicuotas.items():
                 lines += v
             self.REGINFO_CV_COMPRAS_IMPORTACIONES = "\r\n".join(lines)
+
         alicuotas.update(impo_alicuotas)
         self._get_REGINFO_CV_CBTE(alicuotas)
+
+        # Odoo 18: fuerza refresco para que aparezcan los binarios en la vista
+        return {"type": "ir.actions.client", "tag": "reload"}
 
     @api.model
     def _get_partner_document_code_and_number(self, partner):
@@ -252,14 +212,17 @@ class AccountVatLedger(models.Model):
         por los txt"""
         # se exige cuit para todo menos consumidor final
         if partner.l10n_ar_afip_responsibility_type_id.code == "5":
-            doc_code = f"{int(partner.l10n_latam_identification_type_id.l10n_ar_afip_code):0>2d}"
+            doc_code = "{:0>2d}".format(
+                int(partner.l10n_latam_identification_type_id.l10n_ar_afip_code)
+            )
             doc_number = partner.vat or ""
             # limpiamos letras que no son soportadas
             doc_number = re.sub("[^0-9]", "", doc_number)
         elif partner.l10n_ar_afip_responsibility_type_id.code == "9":
             commercial_partner = partner.commercial_partner_id
             doc_number = (
-                partner.l10n_ar_vat or commercial_partner.country_id.l10n_ar_legal_entity_vat
+                partner.l10n_ar_vat
+                or commercial_partner.country_id.l10n_ar_legal_entity_vat
                 if commercial_partner.is_company
                 else commercial_partner.country_id.l10n_ar_natural_vat
             )
@@ -274,7 +237,9 @@ class AccountVatLedger(models.Model):
         res = invoice._l10n_ar_get_document_number_parts(
             invoice.l10n_latam_document_number, invoice.l10n_latam_document_type_id.code
         )
-        return "{:0>20d}".format(res["invoice_number"]), "{:0>5d}".format(res["point_of_sale"])
+        return "{:0>20d}".format(res["invoice_number"]), "{:0>5d}".format(
+            res["point_of_sale"]
+        )
 
     def _get_txt_invoices(self):
         self.ensure_one()
@@ -294,11 +259,13 @@ class AccountVatLedger(models.Model):
             # si no existe la factura en alicuotas es porque no tienen ninguna
             cant_alicuotas = len(alicuotas.get(inv))
 
-            currency_rate = inv.invoice_currency_rate
+            currency_rate = inv.invoice_currency_rate or 1.0
             currency_code = inv.currency_id.l10n_ar_afip_code
 
             invoice_number, pos_number = self._get_pos_and_invoice_invoice_number(inv)
-            doc_code, doc_number = self._get_partner_document_code_and_number(inv.partner_id)
+            doc_code, doc_number = self._get_partner_document_code_and_number(
+                inv.partner_id
+            )
 
             amounts = inv._l10n_ar_get_amounts(company_currency=True)
             amount_total = (1 if inv.is_inbound() else -1) * inv.amount_total_signed
@@ -310,7 +277,9 @@ class AccountVatLedger(models.Model):
             iibb_perc_amount = amounts["iibb_perc_amount"]
             mun_perc_amount = amounts["mun_perc_amount"]
             intern_tax_amount = amounts["intern_tax_amount"]
-            perc_imp_nacionales_amount = amounts["profits_perc_amount"] + amounts["other_perc_amount"]
+            perc_imp_nacionales_amount = (
+                amounts["profits_perc_amount"] + amounts["other_perc_amount"]
+            )
 
             if vat_exempt_base_amount:
                 # operacion con zona franca
@@ -335,7 +304,7 @@ class AccountVatLedger(models.Model):
                 # Campo 1: Fecha de comprobante
                 inv.invoice_date.strftime("%Y%m%d"),
                 # Campo 2: Tipo de Comprobante.
-                f"{int(inv.l10n_latam_document_type_id.code):0>3d}",
+                "{:0>3d}".format(int(inv.l10n_latam_document_type_id.code)),
                 # Campo 3: Punto de Venta
                 pos_number,
                 # Campo 4: Número de Comprobante
@@ -513,11 +482,13 @@ class AccountVatLedger(models.Model):
         self.ensure_one()
         inv = invoice
         invoice_number, pos_number = self._get_pos_and_invoice_invoice_number(inv)
-        doc_code, doc_number = self._get_partner_document_code_and_number(inv.commercial_partner_id)
+        doc_code, doc_number = self._get_partner_document_code_and_number(
+            inv.commercial_partner_id
+        )
         if self.type == "sale":
             row = [
                 # Campo 1: Tipo de Comprobante
-                f"{int(inv.l10n_latam_document_type_id.code):0>3d}",
+                "{:0>3d}".format(int(inv.l10n_latam_document_type_id.code)),
                 # Campo 2: Punto de Venta
                 pos_number,
                 # Campo 3: Número de Comprobante
@@ -543,7 +514,7 @@ class AccountVatLedger(models.Model):
         else:
             row = [
                 # Campo 1: Tipo de Comprobante
-                f"{int(inv.l10n_latam_document_type_id.code):0>3d}",
+                "{:0>3d}".format(int(inv.l10n_latam_document_type_id.code)),
                 # Campo 2: Punto de Venta
                 pos_number,
                 # Campo 3: Número de Comprobante
@@ -573,15 +544,22 @@ class AccountVatLedger(models.Model):
         # empezamos a contar los codigos 1 (no gravado) y 2 (exento) si no hay alicuotas, sumamos una de esta con
         # 0, 0, 0 en detalle usamos mapped por si hay afip codes duplicados (ej. manual y auto)
         if impo:
-            invoices = self._get_txt_invoices().filtered(lambda r: r.l10n_latam_document_type_id.code == "66")
+            invoices = self._get_txt_invoices().filtered(
+                lambda r: r.l10n_latam_document_type_id.code == "66"
+            )
         else:
-            invoices = self._get_txt_invoices().filtered(lambda r: r.l10n_latam_document_type_id.code != "66")
+            invoices = self._get_txt_invoices().filtered(
+                lambda r: r.l10n_latam_document_type_id.code != "66"
+            )
         for inv in invoices:
             lines = []
             vat_taxes = inv._get_vat()
 
             # tipically this is for invoices with zero amount
-            if not vat_taxes and inv.l10n_latam_document_type_id.purchase_aliquots == "not_zero":
+            if (
+                not vat_taxes
+                and inv.l10n_latam_document_type_id.purchase_aliquots == "not_zero"
+            ):
                 lines.append("".join(self._get_tax_row(inv, 0.0, 3, 0.0, impo=impo)))
 
             # we group by afip_code
